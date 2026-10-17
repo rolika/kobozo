@@ -228,7 +228,7 @@ export function parseHungarianDiameter(transcript: string): number | null {
 /**
  * Web Audio chime for acoustic feedback
  */
-function playTone(freq: number, durationSec: number, type: OscillatorType = 'sine'): void {
+export function playTone(freq: number, durationSec: number, type: OscillatorType = 'sine'): void {
   try {
     if (typeof window === 'undefined') return;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -241,8 +241,8 @@ function playTone(freq: number, durationSec: number, type: OscillatorType = 'sin
     osc.type = type;
     osc.frequency.setValueAtTime(freq, ctx.currentTime);
 
-    gain.gain.setValueAtTime(0.15, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + durationSec);
+    gain.gain.setValueAtTime(0.12, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + durationSec);
 
     osc.connect(gain);
     gain.connect(ctx.destination);
@@ -259,6 +259,13 @@ function playTone(freq: number, durationSec: number, type: OscillatorType = 'sin
   } catch {
     // ignore
   }
+}
+
+/**
+ * Immediately unlocks and wakes up browser audio context and audio hardware on user gesture
+ */
+export function unlockAudioContext(): void {
+  playTone(587.33, 0.08, 'sine'); // D5 note - subtle, pleasant prompt sound
 }
 
 /**

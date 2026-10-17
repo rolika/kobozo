@@ -4,7 +4,8 @@ import {
   speakHungarianNumber, 
   vibrateSuccess, 
   vibrateError,
-  isSpeechRecognitionSupported 
+  isSpeechRecognitionSupported,
+  unlockAudioContext
 } from '../utils/hungarianVoiceControl';
 
 interface UseVoiceScalingControlProps {
@@ -46,6 +47,7 @@ export function useVoiceScalingControl({
   const isListeningRef = useRef<boolean>(false);
   const isSpeakingRef = useRef<boolean>(false);
   const isStartingRef = useRef<boolean>(false);
+  const initWatchdogRef = useRef<NodeJS.Timeout | null>(null);
   const restartTimerRef = useRef<NodeJS.Timeout | null>(null);
   const onRecognizedRef = useRef(onDiameterRecognized);
 
@@ -61,6 +63,10 @@ export function useVoiceScalingControl({
 
   // Safely cleanup recognition instance without race conditions
   const cleanupRecognition = useCallback(() => {
+    if (initWatchdogRef.current) {
+      clearTimeout(initWatchdogRef.current);
+      initWatchdogRef.current = null;
+    }
     if (recognitionRef.current) {
       try {
         const rec = recognitionRef.current;
@@ -162,7 +168,6 @@ export function useVoiceScalingControl({
       const recognition = new SpeechRecognition();
       recognition.lang = 'hu-HU';
       // Use continuous = false: UNIVERSALLY supported on Android Chrome, iOS Safari, Desktop Chrome
-      // Continuous = true causes silent failures, immediate aborts or errors on Android Chrome & iOS Safari!
       recognition.continuous = false;
       // Interim results = true: real-time transcription feedback as the user speaks
       recognition.interimResults = true;
@@ -170,25 +175,51 @@ export function useVoiceScalingControl({
 
       isStartingRef.current = true;
 
-      recognition.onstart = () => {
-        isStartingRef.current = false;
-        if (!isListeningRef.current) {
-          try { recognition.abort(); } catch { /* ignore */ }
-          return;
+      // Watchdog: If onstart / audio has not started within 850ms, abort and auto-restart once
+      // (mimicking the exact manual restart after the 8cm test button that worked for the user)
+      if (initWatchdogRef.current) clearTimeout(initWatchdogRef.current);
+      initWatchdogRef.current = setTimeout(() => {
+        if (isListeningRef.current && isStartingRef.current) {
+          console.warn('SpeechRecognition startup watchdog: resetting initial stuck recognition');
+          cleanupRecognition();
+          setTimeout(() => {
+            if (isListeningRef.current && !isSpeakingRef.current) {
+              startSessionRef.current();
+            }
+          }, 80);
         }
+      }, 850);
+
+      const markActive = () => {
+        if (initWatchdogRef.current) {
+          clearTimeout(initWatchdogRef.current);
+          initWatchdogRef.current = null;
+        }
+        isStartingRef.current = false;
         setStatusText('Figyelés aktív – mondjon egy átmérőt (pl. 24, harminchat, 50, száz)!');
         setLastError(null);
       };
 
+      recognition.onstart = () => {
+        if (!isListeningRef.current) {
+          try { recognition.abort(); } catch { /* ignore */ }
+          return;
+        }
+        markActive();
+      };
+
       recognition.onaudiostart = () => {
         setIsHearingSound(true);
+        markActive();
       };
 
       recognition.onsoundstart = () => {
         setIsHearingSound(true);
+        markActive();
       };
 
       recognition.onspeechstart = () => {
+        markActive();
         setIsHearingSpeech(true);
         setStatusText('Beszéd észlelve, feldolgozás...');
       };
@@ -236,6 +267,10 @@ export function useVoiceScalingControl({
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       recognition.onerror = (event: any) => {
+        if (initWatchdogRef.current) {
+          clearTimeout(initWatchdogRef.current);
+          initWatchdogRef.current = null;
+        }
         isStartingRef.current = false;
         const err = event.error;
 
@@ -244,7 +279,7 @@ export function useVoiceScalingControl({
           return;
         }
         if (err === 'aborted') {
-          // Expected when stopping or speaking back
+          // Expected when stopping or speaking back or resetting
           return;
         }
         if (err === 'not-allowed' || err === 'service-not-allowed') {
@@ -273,6 +308,10 @@ export function useVoiceScalingControl({
       };
 
       recognition.onend = () => {
+        if (initWatchdogRef.current) {
+          clearTimeout(initWatchdogRef.current);
+          initWatchdogRef.current = null;
+        }
         isStartingRef.current = false;
         setIsHearingSound(false);
         setIsHearingSpeech(false);
@@ -292,6 +331,10 @@ export function useVoiceScalingControl({
       recognitionRef.current = recognition;
       recognition.start();
     } catch (err: unknown) {
+      if (initWatchdogRef.current) {
+        clearTimeout(initWatchdogRef.current);
+        initWatchdogRef.current = null;
+      }
       isStartingRef.current = false;
       console.warn('SpeechRecognition start error:', err);
       const errMsg = String(err);
@@ -319,6 +362,11 @@ export function useVoiceScalingControl({
     setIsHearingSpeech(false);
     setStatusText('Kikapcsolva');
 
+    if (initWatchdogRef.current) {
+      clearTimeout(initWatchdogRef.current);
+      initWatchdogRef.current = null;
+    }
+
     if (restartTimerRef.current) {
       clearTimeout(restartTimerRef.current);
       restartTimerRef.current = null;
@@ -335,12 +383,15 @@ export function useVoiceScalingControl({
       return;
     }
 
+    // 1. Immediately wake audio hardware on user gesture (same audio activation as the test button)
+    unlockAudioContext();
+
     setLastError(null);
     isListeningRef.current = true;
     setIsListening(true);
     setStatusText('Mikrofon indítása...');
 
-    // Unlock Web Audio & SpeechSynthesis on user gesture
+    // 2. Unlock SpeechSynthesis on user gesture
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
@@ -349,9 +400,12 @@ export function useVoiceScalingControl({
       }
     }
 
-    // Start recognition directly on user gesture without getUserMedia blocking
+    // 3. Clean up any existing instance with abort
+    cleanupRecognition();
+
+    // 4. Start recognition directly on user gesture
     startSession();
-  }, [isSupported, startSession]);
+  }, [isSupported, cleanupRecognition, startSession]);
 
   const toggleListening = useCallback(() => {
     if (isListening) {
@@ -380,6 +434,7 @@ export function useVoiceScalingControl({
     }
     return () => {
       isListeningRef.current = false;
+      if (initWatchdogRef.current) clearTimeout(initWatchdogRef.current);
       if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
       cleanupRecognition();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
