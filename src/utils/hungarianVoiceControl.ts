@@ -269,6 +269,101 @@ export function unlockAudioContext(): void {
 }
 
 /**
+ * Convert any integer (1 to 9999) to its standard Hungarian spoken words.
+ * Examples:
+ * 27 -> "huszonhét"
+ * 100 -> "száz"
+ * 150 -> "százötven"
+ * 248 -> "kétszáznegyvennyolc"
+ * 1000 -> "ezer"
+ * 1010 -> "ezertíz"
+ * 1631 -> "ezerszázharmincegy"
+ * 2000 -> "kétezer"
+ * 2145 -> "kétezer-száznegyvenöt"
+ * 3488 -> "háromezer-négyszáznyolcvannyolc"
+ */
+export function getHungarianNumberWords(num: number): string {
+  if (num <= 0) return 'nulla';
+  if (num > 9999) return num.toString();
+
+  const ONES = ['', 'egy', 'kettő', 'három', 'négy', 'öt', 'hat', 'hét', 'nyolc', 'kilenc'];
+  const TENS_STANDALONE: Record<number, string> = {
+    10: 'tíz',
+    20: 'húsz',
+    30: 'harminc',
+    40: 'negyven',
+    50: 'ötven',
+    60: 'hatvan',
+    70: 'hetven',
+    80: 'nyolcvan',
+    90: 'kilencven',
+  };
+  const TENS_PREFIX: Record<number, string> = {
+    10: 'tizen',
+    20: 'huszon',
+    30: 'harminc',
+    40: 'negyven',
+    50: 'ötven',
+    60: 'hatvan',
+    70: 'hetven',
+    80: 'nyolcvan',
+    90: 'kilencven',
+  };
+
+  const getTensAndOnes = (n: number): string => {
+    if (n === 0) return '';
+    if (n < 10) return ONES[n];
+    const tensVal = Math.floor(n / 10) * 10;
+    const onesVal = n % 10;
+    if (onesVal === 0) return TENS_STANDALONE[tensVal] || '';
+    return `${TENS_PREFIX[tensVal] || ''}${ONES[onesVal]}`;
+  };
+
+  const getHundreds = (n: number): string => {
+    if (n === 0) return '';
+    const h = Math.floor(n / 100);
+    const rem = n % 100;
+    let hStr = '';
+    if (h === 1) {
+      hStr = 'száz';
+    } else if (h === 2) {
+      hStr = 'kétszáz';
+    } else if (h > 2) {
+      hStr = `${ONES[h]}száz`;
+    }
+    const remStr = getTensAndOnes(rem);
+    return `${hStr}${remStr}`;
+  };
+
+  const thousands = Math.floor(num / 1000);
+  const remainder = num % 1000;
+
+  if (thousands === 0) {
+    return getHundreds(remainder);
+  }
+
+  let thStr = '';
+  if (thousands === 1) {
+    thStr = 'ezer';
+  } else if (thousands === 2) {
+    thStr = 'kétezer';
+  } else {
+    thStr = `${ONES[thousands]}ezer`;
+  }
+
+  if (remainder === 0) {
+    return thStr;
+  }
+
+  const remStr = getHundreds(remainder);
+  if (num <= 2000) {
+    return `${thStr}${remStr}`;
+  } else {
+    return `${thStr}-${remStr}`;
+  }
+}
+
+/**
  * Voice feedback: Speaks the Hungarian name of the number aloud
  * Also triggers a subtle pleasant confirmation chime.
  */
@@ -310,6 +405,50 @@ export function speakHungarianNumber(num: number): Promise<void> {
     }
   });
 }
+
+/**
+ * Spoken feedback for the statistical volume datum in liters
+ * Speaks e.g. "száznegyven liter" or "ezerszázharmincegy liter"
+ */
+export function speakHungarianVolume(liters: number): Promise<void> {
+  // Play subtle confirmation chime
+  playTone(880, 0.12, 'sine');
+
+  return new Promise((resolve) => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      resolve();
+      return;
+    }
+
+    try {
+      window.speechSynthesis.cancel(); // Stop any pending spoken speech
+
+      const words = getHungarianNumberWords(liters);
+      const spokenText = `${words} liter`;
+      const utterance = new SpeechSynthesisUtterance(spokenText);
+      utterance.lang = 'hu-HU';
+      utterance.rate = 1.08; // Crisp, responsive speed for forestry work
+      utterance.pitch = 1.0;
+
+      const voices = window.speechSynthesis.getVoices();
+      const huVoice = voices.find((v) => v.lang.startsWith('hu') || v.lang.toLowerCase().includes('hungarian'));
+      if (huVoice) {
+        utterance.voice = huVoice;
+      }
+
+      utterance.onend = () => resolve();
+      utterance.onerror = () => resolve();
+
+      window.speechSynthesis.speak(utterance);
+
+      // Safety fallback timeout
+      setTimeout(resolve, 1600);
+    } catch {
+      resolve();
+    }
+  });
+}
+
 
 /**
  * Audible failure sound (two low warning beeps) for devices without vibration (e.g. laptops)

@@ -100,11 +100,11 @@ export function normalizeSpeciesName(species: string): string {
 }
 
 /**
- * Get statistical log volume in m3 from kobozo database
- * - liters are divided by 1000
+ * Get statistical log volume in liters from kobozo database
+ * - returns exact integer liters (e.g. 26 to 3488 liters)
  * - diameters range from 12 to 100 cm (index = diameter - 12)
  */
-export function getStatisticalLogVolume(
+export function getStatisticalLogVolumeLiters(
   species: string,
   lengthM: number,
   diameterCm: number,
@@ -115,9 +115,8 @@ export function getStatisticalLogVolume(
   const speciesData = db[normalizedSpecies] || db['tölgy'] || Object.values(db)[0];
   
   if (!speciesData) {
-    // Fallback formula if database is empty
     const radiusM = (diameterCm / 100) / 2;
-    return Number((Math.PI * radiusM * radiusM * lengthM).toFixed(3));
+    return Math.round(Math.PI * radiusM * radiusM * lengthM * 1000);
   }
 
   // Find matching length key: e.g. "2.0", "2.6", "3.1", "4.1"
@@ -129,7 +128,7 @@ export function getStatisticalLogVolume(
   const litersArray = speciesData[matchedKey];
   if (!litersArray || litersArray.length === 0) {
     const radiusM = (diameterCm / 100) / 2;
-    return Number((Math.PI * radiusM * radiusM * lengthM).toFixed(3));
+    return Math.round(Math.PI * radiusM * radiusM * lengthM * 1000);
   }
 
   // Index mapping: 12 cm -> index 0, 100 cm -> index 88
@@ -137,13 +136,25 @@ export function getStatisticalLogVolume(
   const index = clampedDiameter - 12;
 
   if (index >= 0 && index < litersArray.length) {
-    const liters = litersArray[index];
-    // Divid by 1000 to get m3
-    const m3 = liters / 1000;
-    return Number(m3.toFixed(3));
+    return litersArray[index];
   }
 
-  // If outside bounds
   const radiusM = (diameterCm / 100) / 2;
-  return Number((Math.PI * radiusM * radiusM * lengthM).toFixed(3));
+  return Math.round(Math.PI * radiusM * radiusM * lengthM * 1000);
 }
+
+/**
+ * Get statistical log volume in m3 from kobozo database
+ * - liters are divided by 1000
+ * - diameters range from 12 to 100 cm (index = diameter - 12)
+ */
+export function getStatisticalLogVolume(
+  species: string,
+  lengthM: number,
+  diameterCm: number,
+  customDb?: KobozoDatabase
+): number {
+  const liters = getStatisticalLogVolumeLiters(species, lengthM, diameterCm, customDb);
+  return Number((liters / 1000).toFixed(3));
+}
+

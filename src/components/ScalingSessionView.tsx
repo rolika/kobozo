@@ -1,6 +1,6 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { ScalingSession, LogEntry, LogQuality } from '../types';
-import { calculateLogVolume, calculateSessionTotals, formatVolume, formatHungarianDate, formatLength } from '../utils/forestryCalculations';
+import { calculateLogVolume, calculateLogVolumeLiters, calculateSessionTotals, formatVolume, formatHungarianDate, formatLength } from '../utils/forestryCalculations';
 import { playSuccessSound, playDeleteSound } from '../utils/soundFeedback';
 import { useVoiceScalingControl } from '../hooks/useVoiceScalingControl';
 import { 
@@ -108,9 +108,13 @@ export const ScalingSessionView: React.FC<ScalingSessionViewProps> = ({
 
   const [voiceActiveDiameter, setVoiceActiveDiameter] = useState<number | null>(null);
 
+  // Ref to voiceControl.speakVolume to allow handleQuickLog to invoke voice feedback without circular dependencies
+  const speakVolumeRef = useRef<(liters: number) => void>(() => {});
+
   // QUICK RECORD: Triggered immediately when any diameter button is pressed
-  const handleQuickLog = useCallback((diameter: number) => {
+  const handleQuickLog = useCallback((diameter: number, fromVoice = false) => {
     const unitVol = calculateLogVolume(diameter, session.logLength, session.treeSpecies);
+    const unitLiters = calculateLogVolumeLiters(diameter, session.logLength, session.treeSpecies);
     const newEntry: LogEntry = {
       id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       diameter,
@@ -127,13 +131,15 @@ export const ScalingSessionView: React.FC<ScalingSessionViewProps> = ({
       updatedAt: Date.now()
     });
 
-    if (soundEnabled) {
-      playSuccessSound();
+    // Ha a felhasználó a gombon kattint/érint és a hangjelzés aktív,
+    // a hangalapú feedback tárgya a rönkhöz tartozó statisztikai űrmérték adat literben kifejezve
+    if (!fromVoice && soundEnabled) {
+      speakVolumeRef.current(unitLiters);
     }
 
     const totalAddedVol = (unitVol * pieceMultiplier).toFixed(3);
     setLastActionMessage({
-      text: `+ ${diameter} cm (${pieceMultiplier} db · ${totalAddedVol} m³) rögzítve`,
+      text: `+ ${diameter} cm (${pieceMultiplier} db · ${unitLiters} l · ${totalAddedVol} m³) rögzítve`,
       type: 'add'
     });
 
@@ -157,14 +163,27 @@ export const ScalingSessionView: React.FC<ScalingSessionViewProps> = ({
       btnEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
-    // 3. Trigger quick log entry (increments counter)
-    handleQuickLog(diameter);
+    // 3. Trigger quick log entry (increments counter) - fromVoice=true prevents double speaking
+    handleQuickLog(diameter, true);
   }, [handleQuickLog]);
+
+  // Provide statistical volume in liters to voice control for speech readout
+  const getDiameterVolumeLiters = useCallback(
+    (diameter: number) => {
+      return calculateLogVolumeLiters(diameter, session.logLength, session.treeSpecies);
+    },
+    [session.logLength, session.treeSpecies]
+  );
 
   const voiceControl = useVoiceScalingControl({
     onDiameterRecognized: handleVoiceRecognized,
+    getDiameterVolumeLiters,
     enabled: true
   });
+
+  useEffect(() => {
+    speakVolumeRef.current = voiceControl.speakVolume;
+  }, [voiceControl.speakVolume]);
 
   // UNDO LAST LOG: "Utolsó visszavonása"
   const handleUndoLast = () => {
@@ -380,7 +399,7 @@ export const ScalingSessionView: React.FC<ScalingSessionViewProps> = ({
                 </div>
 
                 <p className="text-xs text-rose-850 mt-1">
-                  Mondja be a rönk átmérőjét (pl. <em>„harminckettő”</em>, <em>„ötven”</em>, <em>„száz”</em>). A rendszer visszamondja a számot, egy rövid rezgéssel nyugtázza és növeli a számlálót.
+                  Mondja be a rönk átmérőjét (pl. <em>„harminckettő”</em>, <em>„ötven”</em>, <em>„száz”</em>). A rendszer visszamondja a statisztikai űrmértéket literben, egy rövid rezgéssel nyugtázza és rögzíti a tételt.
                 </p>
 
                 {/* Real-time status text */}
@@ -416,9 +435,16 @@ export const ScalingSessionView: React.FC<ScalingSessionViewProps> = ({
                 <div className="bg-white border border-emerald-400 px-3 py-1.5 rounded-xl shadow-2xs flex items-center gap-2">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                   <span className="text-xs text-stone-600 font-medium">Utolsó:</span>
-                  <strong className="text-base font-black text-emerald-800 tabular-numbers">
-                    {voiceControl.lastRecognizedDiameter} cm
-                  </strong>
+                  <div className="flex items-baseline gap-1.5">
+                    <strong className="text-base font-black text-emerald-800 tabular-numbers">
+                      {voiceControl.lastRecognizedDiameter} cm
+                    </strong>
+                    {voiceControl.lastRecognizedLiters && (
+                      <span className="text-xs font-bold text-emerald-600 tabular-numbers">
+                        ({voiceControl.lastRecognizedLiters} l)
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
               <button
@@ -723,6 +749,7 @@ export const ScalingSessionView: React.FC<ScalingSessionViewProps> = ({
           <div className="grid grid-cols-4 gap-1.5 sm:gap-2">
             {displayDiameters.map((diam) => {
               const unitVol = calculateLogVolume(diam, session.logLength, session.treeSpecies);
+              const unitLiters = calculateLogVolumeLiters(diam, session.logLength, session.treeSpecies);
               const loggedCount = countsByDiameter.get(diam) || 0;
               const isDecile = diam % 10 === 0;
 
@@ -743,6 +770,7 @@ export const ScalingSessionView: React.FC<ScalingSessionViewProps> = ({
                       ? 'bg-stone-100/90 border-stone-300 font-bold hover:bg-emerald-100 hover:border-emerald-500'
                       : 'bg-white border-stone-200 hover:bg-emerald-50 hover:border-emerald-400'
                   }`}
+                  title={`${diam} cm: ${unitLiters} liter (${formatVolume(unitVol)} m³)`}
                 >
                   {/* Diameter in big bold text */}
                   <div className="flex items-baseline gap-0.5">
@@ -766,7 +794,7 @@ export const ScalingSessionView: React.FC<ScalingSessionViewProps> = ({
                     </span>
                   </div>
 
-                  {/* Volume subtext */}
+                  {/* Volume subtext: shows both liter and m3 */}
                   <span
                     className={`text-[10px] tabular-numbers font-medium leading-tight mt-0.5 ${
                       isVoiceActive
@@ -774,7 +802,7 @@ export const ScalingSessionView: React.FC<ScalingSessionViewProps> = ({
                         : 'text-stone-500 group-hover:text-emerald-900'
                     }`}
                   >
-                    {formatVolume(unitVol)} m³
+                    <span className="font-bold text-stone-700 group-hover:text-emerald-950">{unitLiters} l</span> · {formatVolume(unitVol)} m³
                   </span>
 
                   {/* Count badge if already logged in this session */}

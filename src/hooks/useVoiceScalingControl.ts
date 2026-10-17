@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   parseHungarianDiameter, 
   speakHungarianNumber, 
+  speakHungarianVolume,
   vibrateSuccess, 
   vibrateError,
   isSpeechRecognitionSupported,
@@ -10,6 +11,7 @@ import {
 
 interface UseVoiceScalingControlProps {
   onDiameterRecognized: (diameter: number) => void;
+  getDiameterVolumeLiters?: (diameter: number) => number;
   enabled?: boolean;
 }
 
@@ -21,17 +23,20 @@ export interface VoiceControlState {
   isHearingSpeech: boolean;
   lastTranscript: string;
   lastRecognizedDiameter: number | null;
+  lastRecognizedLiters: number | null;
   lastError: string | null;
   statusText: string;
   toggleListening: () => void;
   startListening: () => void;
   stopListening: () => void;
   restartListening: () => void;
+  speakVolume: (liters: number) => void;
   simulateVoiceInput: (testInput: string) => void;
 }
 
 export function useVoiceScalingControl({
   onDiameterRecognized,
+  getDiameterVolumeLiters,
   enabled = true
 }: UseVoiceScalingControlProps): VoiceControlState {
   const [isListening, setIsListening] = useState<boolean>(false);
@@ -40,6 +45,7 @@ export function useVoiceScalingControl({
   const [isHearingSpeech, setIsHearingSpeech] = useState<boolean>(false);
   const [lastTranscript, setLastTranscript] = useState<string>('');
   const [lastRecognizedDiameter, setLastRecognizedDiameter] = useState<number | null>(null);
+  const [lastRecognizedLiters, setLastRecognizedLiters] = useState<number | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
   const [statusText, setStatusText] = useState<string>('Kikapcsolva');
 
@@ -52,6 +58,7 @@ export function useVoiceScalingControl({
   const initWatchdogRef = useRef<NodeJS.Timeout | null>(null);
   const restartTimerRef = useRef<NodeJS.Timeout | null>(null);
   const onRecognizedRef = useRef(onDiameterRecognized);
+  const getDiameterVolumeLitersRef = useRef(getDiameterVolumeLiters);
 
   // Track processed utterance to avoid duplicates
   const lastProcessedTimeRef = useRef<number>(0);
@@ -60,6 +67,10 @@ export function useVoiceScalingControl({
   useEffect(() => {
     onRecognizedRef.current = onDiameterRecognized;
   }, [onDiameterRecognized]);
+
+  useEffect(() => {
+    getDiameterVolumeLitersRef.current = getDiameterVolumeLiters;
+  }, [getDiameterVolumeLiters]);
 
   const isSupported = isSpeechRecognitionSupported();
 
@@ -106,24 +117,39 @@ export function useVoiceScalingControl({
     lastProcessedTimeRef.current = now;
     lastProcessedDiameterRef.current = diameter;
 
-    // 1. Egy rövid rezgéssel azonnal jelezze a megértést (120ms)
+    // 1. Calculate statistical volume datum in liters
+    const liters = getDiameterVolumeLitersRef.current
+      ? getDiameterVolumeLitersRef.current(diameter)
+      : null;
+
+    // 2. Egy rövid rezgéssel azonnal jelezze a megértést (120ms)
     vibrateSuccess();
 
-    // 2. Felület frissítése
+    // 3. Felület frissítése
     setLastRecognizedDiameter(diameter);
+    setLastRecognizedLiters(liters);
     setLastTranscript(transcript || diameter.toString());
-    setStatusText(`✓ ${diameter} cm felismerve és rögzítve!`);
+    if (liters !== null) {
+      setStatusText(`✓ ${diameter} cm (${liters} liter) felismerve és rögzítve!`);
+    } else {
+      setStatusText(`✓ ${diameter} cm felismerve és rögzítve!`);
+    }
     setLastError(null);
 
-    // 3. Aktiválja a számhoz tartozó nyomógombot és növelje a számlálót
+    // 4. Aktiválja a számhoz tartozó nyomógombot és növelje a számlálót
     onRecognizedRef.current(diameter);
 
-    // 4. Hangos visszamondás magyarul: felfüggesztjük a mikrofont, hogy ne hallja meg önmagát
+    // 5. Hangalapú feedback tárgya az átmérőhöz tartozó statisztikai űrmérték adat literben kifejezve
+    // Felfüggesztjük a mikrofont a hangos visszamondás idejére, hogy ne hallja meg önmagát
     isSpeakingRef.current = true;
     setIsSpeaking(true);
     cleanupRecognition();
 
-    speakHungarianNumber(diameter).finally(() => {
+    const speakPromise = liters !== null
+      ? speakHungarianVolume(liters)
+      : speakHungarianNumber(diameter);
+
+    speakPromise.finally(() => {
       // 300ms szünet a visszhang / hangszóró lecsengése után, majd folytatjuk a figyelést
       setTimeout(() => {
         isSpeakingRef.current = false;
@@ -432,6 +458,28 @@ export function useVoiceScalingControl({
     }
   }, [startListening, stopListening]);
 
+  // Voice feedback for manual button press:
+  // Speaks the volume in liters, suspending recognition if active so mic does not hear playback
+  const speakVolume = useCallback((liters: number) => {
+    if (isListeningRef.current) {
+      isSpeakingRef.current = true;
+      setIsSpeaking(true);
+      cleanupRecognition();
+
+      speakHungarianVolume(liters).finally(() => {
+        setTimeout(() => {
+          isSpeakingRef.current = false;
+          setIsSpeaking(false);
+          if (isListeningRef.current) {
+            startSessionRef.current();
+          }
+        }, 300);
+      });
+    } else {
+      speakHungarianVolume(liters);
+    }
+  }, [cleanupRecognition]);
+
   // Test simulation for manual validation or diagnostics
   const simulateVoiceInput = useCallback((testInput: string) => {
     setLastTranscript(testInput);
@@ -484,12 +532,14 @@ export function useVoiceScalingControl({
     isHearingSpeech,
     lastTranscript,
     lastRecognizedDiameter,
+    lastRecognizedLiters,
     lastError,
     statusText,
     toggleListening,
     startListening,
     stopListening,
     restartListening: startListening,
+    speakVolume,
     simulateVoiceInput
   };
 }

@@ -1,5 +1,5 @@
 import { LogEntry, ScalingSession, SessionTotals, DiameterStat } from '../types';
-import { getStatisticalLogVolume } from '../data/kobozoData';
+import { getStatisticalLogVolume, getStatisticalLogVolumeLiters } from '../data/kobozoData';
 
 /**
  * Fatérfogat számítás a kobozo.txt statisztikai köbértékei alapján
@@ -16,6 +16,22 @@ export function calculateLogVolume(
   if (diameterCm <= 0 || lengthM <= 0) return 0;
   return getStatisticalLogVolume(species, lengthM, diameterCm);
 }
+
+/**
+ * Rönktérfogat lekérdezése literben a hivatalos kobozo.txt statisztikai tábla alapján
+ * @param diameterCm Átmérő cm-ben (12..100 cm)
+ * @param lengthM Rönkhossz méterben (2.0, 2.6, 3.1, 4.1 m)
+ * @param species Fafajta (akác, bükk, fenyő, tölgy)
+ */
+export function calculateLogVolumeLiters(
+  diameterCm: number,
+  lengthM: number,
+  species: string = 'tölgy'
+): number {
+  if (diameterCm <= 0 || lengthM <= 0) return 0;
+  return getStatisticalLogVolumeLiters(species, lengthM, diameterCm);
+}
+
 
 /**
  * Számított statisztikák és összesítések egy köbözési tételhez
