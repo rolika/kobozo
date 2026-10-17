@@ -26,6 +26,7 @@ export interface VoiceControlState {
   toggleListening: () => void;
   startListening: () => void;
   stopListening: () => void;
+  restartListening: () => void;
   simulateVoiceInput: (testInput: string) => void;
 }
 
@@ -47,6 +48,7 @@ export function useVoiceScalingControl({
   const isListeningRef = useRef<boolean>(false);
   const isSpeakingRef = useRef<boolean>(false);
   const isStartingRef = useRef<boolean>(false);
+  const startupAttemptsRef = useRef<number>(0);
   const initWatchdogRef = useRef<NodeJS.Timeout | null>(null);
   const restartTimerRef = useRef<NodeJS.Timeout | null>(null);
   const onRecognizedRef = useRef(onDiameterRecognized);
@@ -89,8 +91,9 @@ export function useVoiceScalingControl({
     isStartingRef.current = false;
   }, []);
 
-  // Forward declaration of startSession
+  // Forward declarations for references to avoid circular dependencies
   const startSessionRef = useRef<() => void>(() => {});
+  const restartProcedureRef = useRef<() => void>(() => {});
 
   // Handle a successfully identified diameter (12-100)
   const handleValidDiameter = useCallback((diameter: number, transcript: string) => {
@@ -175,20 +178,26 @@ export function useVoiceScalingControl({
 
       isStartingRef.current = true;
 
-      // Watchdog: If onstart / audio has not started within 850ms, abort and auto-restart once
-      // (mimicking the exact manual restart after the 8cm test button that worked for the user)
+      // Watchdog: If recognition does not actively start within 750ms,
+      // run the exact restart procedure that reliably initializes the microphone!
       if (initWatchdogRef.current) clearTimeout(initWatchdogRef.current);
       initWatchdogRef.current = setTimeout(() => {
         if (isListeningRef.current && isStartingRef.current) {
-          console.warn('SpeechRecognition startup watchdog: resetting initial stuck recognition');
+          startupAttemptsRef.current += 1;
+          console.warn(`SpeechRecognition startup watchdog: restarting stuck microphone (attempt ${startupAttemptsRef.current})`);
+          setStatusText(`Mikrofon inicializálása (${startupAttemptsRef.current})...`);
+          
+          // Re-prime audio hardware just like the successful manual restart button
+          unlockAudioContext();
           cleanupRecognition();
+
           setTimeout(() => {
             if (isListeningRef.current && !isSpeakingRef.current) {
               startSessionRef.current();
             }
           }, 80);
         }
-      }, 850);
+      }, 750);
 
       const markActive = () => {
         if (initWatchdogRef.current) {
@@ -196,6 +205,7 @@ export function useVoiceScalingControl({
           initWatchdogRef.current = null;
         }
         isStartingRef.current = false;
+        startupAttemptsRef.current = 0;
         setStatusText('Figyelés aktív – mondjon egy átmérőt (pl. 24, harminchat, 50, száz)!');
         setLastError(null);
       };
@@ -238,6 +248,7 @@ export function useVoiceScalingControl({
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       recognition.onresult = (event: any) => {
+        markActive();
         if (isSpeakingRef.current || !isListeningRef.current) return;
 
         const results = event.results;
@@ -275,7 +286,7 @@ export function useVoiceScalingControl({
         const err = event.error;
 
         if (err === 'no-speech') {
-          // Normal silence in the forest, keep listening
+          // Normal silence, keep listening loop alive
           return;
         }
         if (err === 'aborted') {
@@ -375,7 +386,8 @@ export function useVoiceScalingControl({
     cleanupRecognition();
   }, [cleanupRecognition]);
 
-  // Start listening triggered by user click (trusted gesture)
+  // The unified, reliable start/restart procedure:
+  // Wakes audio context, cancels stale speech synthesis, cleans up, and launches session
   const startListening = useCallback(() => {
     if (!isSupported) {
       setLastError('A hangfelismerés nem támogatott ebben a böngészőben (Google Chrome, Edge vagy Safari javasolt).');
@@ -383,13 +395,14 @@ export function useVoiceScalingControl({
       return;
     }
 
-    // 1. Immediately wake audio hardware on user gesture (same audio activation as the test button)
+    // 1. Immediately wake audio hardware on user gesture
     unlockAudioContext();
 
     setLastError(null);
     isListeningRef.current = true;
     setIsListening(true);
     setStatusText('Mikrofon indítása...');
+    startupAttemptsRef.current = 0;
 
     // 2. Unlock SpeechSynthesis on user gesture
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -407,13 +420,17 @@ export function useVoiceScalingControl({
     startSession();
   }, [isSupported, cleanupRecognition, startSession]);
 
+  useEffect(() => {
+    restartProcedureRef.current = startListening;
+  }, [startListening]);
+
   const toggleListening = useCallback(() => {
-    if (isListening) {
+    if (isListeningRef.current) {
       stopListening();
     } else {
       startListening();
     }
-  }, [isListening, startListening, stopListening]);
+  }, [startListening, stopListening]);
 
   // Test simulation for manual validation or diagnostics
   const simulateVoiceInput = useCallback((testInput: string) => {
@@ -427,15 +444,20 @@ export function useVoiceScalingControl({
     }
   }, [handleValidDiameter, handleInvalidUtterance]);
 
-  // Cleanup on unmount or when disabled
+  // CRITICAL: Cleanup ONLY on component unmount!
+  // Do NOT include isListening in dependencies, as that would trigger cleanup on initial start!
   useEffect(() => {
-    if (!enabled && isListening) {
-      stopListening();
-    }
     return () => {
       isListeningRef.current = false;
-      if (initWatchdogRef.current) clearTimeout(initWatchdogRef.current);
-      if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+      isStartingRef.current = false;
+      if (initWatchdogRef.current) {
+        clearTimeout(initWatchdogRef.current);
+        initWatchdogRef.current = null;
+      }
+      if (restartTimerRef.current) {
+        clearTimeout(restartTimerRef.current);
+        restartTimerRef.current = null;
+      }
       cleanupRecognition();
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         try {
@@ -445,7 +467,14 @@ export function useVoiceScalingControl({
         }
       }
     };
-  }, [enabled, isListening, stopListening, cleanupRecognition]);
+  }, [cleanupRecognition]);
+
+  // Stop listening only when enabled prop externally turns false
+  useEffect(() => {
+    if (!enabled && isListeningRef.current) {
+      stopListening();
+    }
+  }, [enabled, stopListening]);
 
   return {
     isListening,
@@ -460,6 +489,7 @@ export function useVoiceScalingControl({
     toggleListening,
     startListening,
     stopListening,
+    restartListening: startListening,
     simulateVoiceInput
   };
 }
